@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Neon Runner — Web</title>
+<style>
+  html,body{margin:0;height:100%;background:#06080f;color:#cfe9ff;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px}
+  #hud{width:100%;max-width:720px;display:flex;justify-content:space-between;align-items:center;font-weight:700}
+  #hud .pill{background:rgba(0,18,36,.6);border:1px solid rgba(120,200,255,.25);padding:8px 12px;border-radius:999px;backdrop-filter:blur(4px)}
+  #canvasWrap{position:relative;width:100%;max-width:720px;aspect-ratio:9/16}
+  #game{width:100%;height:100%;background:radial-gradient(120% 140% at 50% 10%,#0b1a2b 0%,#04070d 60%,#020308 100%);border-radius:16px;border:1px solid rgba(120,200,255,.2);box-shadow:0 10px 30px rgba(0,0,0,.5) inset,0 20px 40px rgba(0,0,0,.35)}
+  #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px}
+  .card{background:rgba(0,12,24,.7);border:1px solid rgba(120,200,255,.25);border-radius:16px;padding:16px;max-width:90%}
+  button{background:#0e2a49;color:#cfe9ff;border:1px solid rgba(120,200,255,.4);border-radius:12px;padding:10px 14px;font-weight:800}
+  button:active{transform:scale(.98)}
+  .hint{font-size:12px;opacity:.75}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="pill">Dist: <span id="dist">0</span> m</div>
+    <div class="pill">Score: <span id="score">0</span></div>
+    <div class="pill">Cores: <span id="cred">0</span></div>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="game" width="540" height="960"></canvas>
+    <div id="overlay">
+      <div class="card">
+        <h2>Neon Runner</h2>
+        <p>Swipe left/right (lanes), swipe up (jump), tap (slash drones).<br>
+           Best: <span id="bestDist">0</span> m • Cores bank: <span id="bank">0</span></p>
+        <div>
+          <button id="playBtn">Play</button>
+          <button id="pauseBtn" style="display:none">Pause</button>
+          <button id="resumeBtn" style="display:none">Resume</button>
+        </div>
+        <p class="hint">Add to Home Screen for full-screen play.</p>
+      </div>
+    </div>
+  </div>
+  <div class="hint">Saves progress locally in your browser.</div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = () => canvas.width, H = () => canvas.height;
+
+  const hudDist = document.getElementById('dist');
+  const hudScore = document.getElementById('score');
+  const hudCred  = document.getElementById('cred');
+  const overlay  = document.getElementById('overlay');
+  const playBtn  = document.getElementById('playBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resumeBtn= document.getElementById('resumeBtn');
+  const bestDist = document.getElementById('bestDist');
+  const bankSpan = document.getElementById('bank');
+
+  const store = {
+    get(){ try{ return JSON.parse(localStorage.getItem('neonrunner')||'{}'); }catch(e){ return {}; } },
+    set(d){ localStorage.setItem('neonrunner', JSON.stringify(d)); }
+  };
+  let save = Object.assign({best:0, bank:0}, store.get());
+  bestDist.textContent = save.best; bankSpan.textContent = save.bank;
+
+  function fitCanvas(){
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  addEventListener('resize', fitCanvas, {passive:true}); fitCanvas();
+
+  const state = {
+    running:false, paused:false,
+    lanes:3, laneX:[], laneDistance:110,
+    groundY:780,
+    player:{lane:1,x:0,y:0,vy:0,w:44,h:44,slashTimer:0,grounded:true},
+    speed:4, speedGain:0.0012, gravity:0.6, jump:14,
+    entities:[], nextSpawnZ:0, zSpacing:120,
+    distance:0, score:0, credits:0, slashCooldown:0
+  };
+
+  function init(){
+    const cx = W()/2, off = state.laneDistance;
+    state.laneX = [cx-off, cx, cx+off];
+    Object.assign(state.player, {lane:1,x:state.laneX[1],y:state.groundY,vy:0,slashTimer:0,grounded:true});
+    state.entities.length = 0;
+    state.nextSpawnZ = 0; state.speed = 4; state.distance=0; state.score=0; state.credits=0; state.slashCooldown=0;
+    hudDist.textContent='0'; hudScore.textContent='0'; hudCred.textContent='0';
+  }
+
+  function start(){
+    init();
+    overlay.style.display='none'; playBtn.style.display='none';
+    pauseBtn.style.display=''; resumeBtn.style.display='none';
+    state.running = true; state.paused = false;
+  }
+  function gameOver(){
+    state.running=false;
+    save.best = Math.max(save.best, Math.floor(state.distance));
+    save.bank += state.credits;
+    store.set(save);
+    bestDist.textContent = save.best; bankSpan.textContent = save.bank;
+
+    pauseBtn.style.display='none'; resumeBtn.style.display='none';
+    overlay.style.display=''; overlay.querySelector('h2').textContent='Game Over';
+    overlay.querySelector('p').innerHTML = 'Tap Play to try again.<br>Best: '+save.best+' m • Bank: '+save.bank;
+    playBtn.style.display='';
+  }
+  function pause(){
+    if(!state.running) return;
+    state.paused=true; pauseBtn.style.display='none'; resumeBtn.style.display=''; overlay.style.display='';
+    overlay.querySelector('h2').textContent='Paused';
+    overlay.querySelector('p').textContent='Swipe left/right to change lanes, swipe up to jump, tap to slash.';
+  }
+  function resume(){
+    if(!state.running) return;
+    state.paused=false; pauseBtn.style.display=''; resumeBtn.style.display='none'; overlay.style.display='none';
+  }
+  playBtn.addEventListener('click', start);
+  pauseBtn.addEventListener('click', pause);
+  resumeBtn.addEventListener('click', resume);
+
+  // Touch + Mouse
+  let touch0=null;
+  function onStart(x,y){ touch0={x,y,t:performance.now()}; }
+  function onEnd(x,y){
+    if(!touch0) return;
+    const dx=x-touch0.x, dy=y-touch0.y, adx=Math.abs(dx), ady=Math.abs(dy);
+    const dt=performance.now()-touch0.t;
+    if(dt<250 && adx<15 && ady<15){ slash(); }
+    else{
+      if(adx>ady){ if(dx<-40) laneLeft(); else if(dx>40) laneRight(); }
+      else{ if(dy<-40) jump(); }
+    }
+    touch0=null;
+  }
+  canvas.addEventListener('touchstart', e=>{const t=e.touches[0]; onStart(t.clientX,t.clientY);},{passive:true});
+  canvas.addEventListener('touchend',   e=>{const t=e.changedTouches[0]; onEnd(t.clientX,t.clientY);},{passive:true});
+  canvas.addEventListener('mousedown', e=>onStart(e.clientX,e.clientY));
+  canvas.addEventListener('mouseup',   e=>onEnd(e.clientX,e.clientY));
+  addEventListener('keydown', e=>{
+    if(e.key==='ArrowLeft') laneLeft();
+    if(e.key==='ArrowRight') laneRight();
+    if(e.key==='ArrowUp'||e.key===' ') jump();
+    if(e.key==='x'||e.key==='X') slash();
+  });
+
+  function laneLeft(){ state.player.lane = Math.max(0, state.player.lane-1); }
+  function laneRight(){ state.player.lane = Math.min(state.lanes-1, state.player.lane+1); }
+  function jump(){ if(state.player.grounded){ state.player.vy=-state.jump; state.player.grounded=false; } }
+  function slash(){ if(state.slashCooldown>0) return; state.player.slashTimer=140; state.slashCooldown=260; }
+
+  function spawnRow(z){
+    const pick = ()=>Math.random();
+    const types = [0,0,0].map(()=>{ const r=pick(); return r<.15?2 : (r<.45?1 : (r<.75?3:0)); });
+    if(types.every(v=>v===1)) types[Math.floor(Math.random()*3)]=0;
+    types.forEach((t,l)=>{
+      if(!t) return;
+      const x = state.laneX[l];
+      if(t===1) state.entities.push({kind:'ob',x,y:state.groundY-22,w:86,h:42,z});
+      if(t===2) state.entities.push({kind:'drone',x,y:state.groundY-80,w:62,h:32,z,vy:(Math.random()<.5?-0.6:0.6)});
+      if(t===3) state.entities.push({kind:'coin',x,y:state.groundY-60,w:26,h:26,z,t:0});
+    });
+  }
+  function aabb(a,b){ return (Math.abs(a.x-b.x)*2<(a.w+b.w)) && (Math.abs(a.y-b.y)*2<(a.h+b.h)); }
+
+  function drawBG(){
+    const g = ctx.createLinearGradient(0,0,0,H()); g.addColorStop(0,'#0a1830'); g.addColorStop(.65,'#070c16'); g.addColorStop(1,'#03060d');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W(),H());
+    // lanes + crystals
+    ctx.strokeStyle='rgba(140,220,255,.25)'; ctx.lineWidth=2;
+    const top=120, bot=H()-60;
+    ctx.setLineDash([6,10]); ctx.strokeStyle='rgba(120,200,255,.25)'; ctx.lineWidth=2;
+    for(let i=0;i<state.lanes;i++){ const x=state.laneX[i]; ctx.beginPath(); ctx.moveTo(x,bot); ctx.lineTo(x,top); ctx.stroke(); }
+    ctx.setLineDash([]);
+    for(let i=0;i<8;i++){ const x=(i+1)*W()/9, h=40+Math.sin(performance.now()*0.001+i)*20;
+      ctx.fillStyle='rgba(0,255,220,.06)'; ctx.beginPath(); ctx.moveTo(x,bot); ctx.lineTo(x-10,bot-h); ctx.lineTo(x+10,bot-h); ctx.closePath(); ctx.fill(); }
+  }
+
+  function drawPlayer(dt){
+    const p=state.player;
+    p.x += (state.laneX[p.lane]-p.x)*0.35;
+    p.vy += state.gravity; p.y += p.vy;
+    if(p.y>=state.groundY){ p.y=state.groundY; p.vy=0; p.grounded=true; }
+    if(p.slashTimer>0){ p.slashTimer -= dt; ctx.beginPath(); ctx.arc(p.x+28,p.y-28,40,-0.2,1.0);
+      ctx.strokeStyle='rgba(0,255,245,.85)'; ctx.lineWidth=6; ctx.stroke(); }
+    if(state.slashCooldown>0) state.slashCooldown -= dt;
+    ctx.fillStyle='#7fd0ff'; ctx.fillRect(p.x-p.w/2, p.y-p.h, p.w, p.h);
+    ctx.fillStyle='#0b1f33'; ctx.fillRect(p.x-p.w/2+8, p.y-p.h+10, p.w-16, 10);
+  }
+
+  let last=performance.now();
+  function loop(now){
+    requestAnimationFrame(loop);
+    let dt = now - last; last = now;
+    if(!state.running || state.paused) return;
+
+    state.speed += state.speedGain * dt;
+    state.distance += state.speed * dt * 0.08;
+    hudDist.textContent = Math.floor(state.distance).toString();
+
+    while(state.nextSpawnZ < state.distance + 1200){ spawnRow(state.nextSpawnZ); state.nextSpawnZ += state.zSpacing; }
+
+    for (let i=state.entities.length-1;i>=0;i--){
+      const e=state.entities[i];
+      e.z -= state.speed * dt * 0.08;
+      if(e.kind==='drone'){ e.y += e.vy; if(e.y<state.groundY-120 || e.y>state.groundY-40) e.vy*=-1; }
+      if(e.kind==='coin') e.t += dt;
+      e.screenY = state.groundY - (state.distance - e.z);
+      if(e.screenY > H()+80){ state.entities.splice(i,1); continue; }
+
+      const pbox = {x:state.player.x, y:state.player.y-22, w:36, h:36};
+      const ebox = {x:e.x, y:e.screenY, w:e.w, h:e.h};
+      if(e.kind==='coin' && aabb(pbox, ebox)){ state.credits++; hudCred.textContent=state.credits.toString(); state.entities.splice(i,1); continue; }
+      if((e.kind==='ob'||e.kind==='drone') && aabb(pbox, ebox)){
+        if(e.kind==='drone' && state.player.slashTimer>0){ state.score+=5; hudScore.textContent=state.score.toString(); state.entities.splice(i,1); continue; }
+        else { gameOver(); continue; }
+      }
+    }
+
+    ctx.clearRect(0,0,W(),H());
+    drawBG();
+    for(const e of state.entities){
+      const y=e.screenY;
+      if(e.kind==='ob'){ ctx.fillStyle='#2ad1ff33'; ctx.strokeStyle='#93e2ff'; ctx.lineWidth=2;
+        ctx.fillRect(e.x-e.w/2,y-e.h,e.w,e.h); ctx.strokeRect(e.x-e.w/2,y-e.h,e.w,e.h); }
+      else if(e.kind==='drone'){ ctx.fillStyle='#ff6b6b'; ctx.fillRect(e.x-e.w/2,y-e.h,e.w,e.h);
+        ctx.fillStyle='#111'; ctx.fillRect(e.x-10,y-e.h+8,20,6); }
+      else if(e.kind==='coin'){ ctx.beginPath(); ctx.arc(e.x,y-e.h/2,12,0,Math.PI*2); ctx.fillStyle='#ffd166'; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#ffe9a8'; ctx.stroke(); }
+    }
+    drawPlayer(dt);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
